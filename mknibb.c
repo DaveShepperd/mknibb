@@ -15,13 +15,14 @@ extern int optind, opterr, optopt;
 	   
 static int helpEm(const char *progName)
 {
-	 printf("Usage: %s [-hl] [-f fill] [-t size] [-o outfile] filename\n"
+	 printf("Usage: %s [-hlv] [-f fill] [-t size] [-o outfile] filename\n"
 			"Where:\n"
 			"-f fill = set fill nibble (default 0) only relevant if -l or -h also provided).\n"
 			"-l = include just the low 4 bit nibble (default is to leave both nibbles in place)\n"
 			"-h = shift the upper nibble into the low bits\n"
 			"-o outfile = path to output file. If not specified input file is clipped in place\n"
 			"-t size = size to clip file (must be one of: 32, 64, 128, 256, 512 or 1024.)\n"
+			"-v = increase verbosity\n"
 			"filename = path to file\n"
 			,progName
 			);
@@ -30,17 +31,17 @@ static int helpEm(const char *progName)
 
 int main(int argc, char *argv[])
 {
-	 int sts, ifd, ofd, flags, opt, fill=0;
+	 int sts, ifd, ofd, flags, opt, fill=0, verbose=0;
 	 struct stat st;
 	 int bufSize, outFnameLen;
-	 unsigned char buf[256];
+	 unsigned char buf[1024];
 	 const char *inFname, *userOutName;
-	 char *endp, *outFname;
+	 char *endp, *outFname, *inBackupName=NULL;
 
 	 flags = 0;
 	 bufSize = 0;
 	 userOutName = NULL;
-	 while ( (opt = getopt(argc, argv, "f:hlo:t:")) != -1 )
+	 while ( (opt = getopt(argc, argv, "f:hlo:t:v")) != -1 )
 	 {
 		 switch (opt)
 		 {
@@ -65,11 +66,14 @@ int main(int argc, char *argv[])
 		 case 't':
 			 endp = NULL;
 			 bufSize = strtol(optarg,&endp,0);
-			 if (!endp || *endp || bufSize < 32 || bufSize > 256 || ((bufSize&-bufSize) != bufSize) )
+			 if (!endp || *endp || bufSize < 32 || bufSize > 1024 || ((bufSize&-bufSize) != bufSize) )
 			 {
-				 fprintf(stderr,"Invalid size parameter '%s'.\n", argv[1]);
+				 fprintf(stderr,"Invalid -t size parameter '%s'.\n", optarg);
 				 return helpEm(argv[0]);
 			 }
+			 break;
+		 case 'v':
+			 ++verbose;
 			 break;
 		 default: /* '?' */
 			 return helpEm(argv[0]);
@@ -77,22 +81,40 @@ int main(int argc, char *argv[])
 	}
 	if (optind < 1)
 	{
-		fprintf(stderr,"No filename\n");
+		fprintf(stderr,"No input filename\n");
 		return helpEm(argv[0]);
 	}
-	if ( !bufSize && !flags )
+	if ( !flags )
 	{
 		fprintf(stderr,"No -l, -h or -t provided. Nothing to do.\n");
 		return helpEm(argv[0]);
 	}
 	inFname = argv[optind];
-	sts = stat(inFname,&st);
+	if ( verbose )
+		printf("Checking on input file: %s\n", inFname);
+	sts = stat(inFname, &st);
 	if (sts)
 	{
 		fprintf(stderr,"Error stat()'ing '%s': %s\n", inFname, strerror(errno));
 		return 1;
 	}
-	if (st.st_size < (size_t)bufSize)
+	if ( !bufSize )
+	{
+		bufSize = st.st_size;
+		if ( verbose )
+			printf("Defaulting file size to %d\n", bufSize);
+		if ( ((bufSize&-bufSize) != bufSize) )
+		{
+			fprintf(stderr,"File size not a multiple of power of 2. size=0x%X\n", bufSize);
+			return 1;
+		}
+		if ( bufSize < 64 || bufSize > (int)sizeof(buf) )
+		{
+			fprintf(stderr,"Input file size is %ld. Cannot be less than 64 or more than %ld\n", st.st_size, sizeof(buf));
+			return 1;
+		}
+	}
+	if ( st.st_size < (size_t)bufSize )
 	{
 		fprintf(stderr,"Error: File size of %ld is smaller than %d\n", st.st_size, bufSize);
 		return 1;
@@ -116,18 +138,51 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	close(ifd);
+	if ( verbose )
+		printf("Read %d bytes from input file\n", sts);
 	if ( !userOutName )
+	{
+		sts = strlen(inFname)+5;
+		inBackupName = (char *)calloc(sts,1);
+		if ( !inBackupName )
+		{
+			fprintf(stderr,"Ran out of memory malloc()'ing %d bytes\n", sts);
+			return 1;
+		}
+		snprintf(inBackupName,sts,"%s.bak",inFname);
+		if ( verbose )
+			printf("Pre-deleting old backup file: %s\n", inBackupName);
+		sts = unlink(inBackupName);
+		if ( sts < 0 && errno != ENOENT )
+		{
+			fprintf(stderr,"Error deleting %s: %s\n", inBackupName, strerror(errno));
+			return 1;
+		}
+		if ( verbose )
+			printf("Rename %s to %s ...\n", inFname,inBackupName);
+		sts = rename(inFname,inBackupName);
+		if ( sts < 0 )
+		{
+			fprintf(stderr,"Error renaming %s to %s: %s\n", inFname, inBackupName, strerror(errno));
+			return 1;
+		}
+		if ( verbose )
+			printf("Defaulting output file to: %s\n", inFname);
 		userOutName = inFname;
+		free(inBackupName);
+	}
 	outFnameLen = strlen(userOutName) + 8;
 	outFname = (char *)malloc(outFnameLen);
 	snprintf(outFname,outFnameLen-1,"%sXXXXXX", userOutName);
 	outFname[outFnameLen-1] = 0;
-	if ( (ofd=mkstemp(outFname)) < 0 )
+	if ( (ofd = mkstemp(outFname)) < 0 )
 	{
 		fprintf(stderr,"Error: Unable to make tmp filename from '%s': %s\n", outFname, strerror(errno));
 		free(outFname);
 		return 1;
 	}
+	if ( verbose )
+		printf("Opened temp file %s for output\n", outFname);
 	if ( flags )
 	{
 		fill <<= 4;
@@ -139,6 +194,8 @@ int main(int argc, char *argv[])
 			buf[sts] |= fill;
 		}
 	}
+	if ( verbose )
+		printf("Writing %d bytes to output\n", bufSize);
 	sts = write(ofd, buf, bufSize);
 	if (sts != bufSize)
 	{
@@ -149,6 +206,8 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	close(ofd);
+	if ( verbose )
+		printf("Wrote %d bytes to output.\nPredelting %s\n", bufSize, userOutName);
 	sts = unlink(userOutName);
 	if (sts < 0 && errno != ENOENT )
 	{
@@ -157,10 +216,21 @@ int main(int argc, char *argv[])
 		free(outFname);
 		return 1;
 	}
-	sts = rename(outFname,userOutName);
+	if ( verbose )
+		printf("Renaming temp file %s to %s\n", outFname, userOutName);
+	sts = rename(outFname, userOutName);
 	if (sts < 0)
 	{
 		fprintf(stderr,"Error renaming '%s' to '%s': %s\n", outFname, userOutName, strerror(errno));
+		free(outFname);
+		return 1;
+	}
+	if ( verbose )
+		printf("Set the file mode bits\n");
+	sts = chmod(userOutName,st.st_mode);
+	if (sts < 0)
+	{
+		fprintf(stderr,"Error setting file mode bits on '%s': %s\n", userOutName, strerror(errno));
 		free(outFname);
 		return 1;
 	}
