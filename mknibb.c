@@ -10,6 +10,12 @@
 #include <strings.h>
 #include <getopt.h>
 
+#ifndef O_BINARY
+#define O_BINARY (0)
+#endif
+
+#define MAX_BUFSIZE (8192)
+
 extern char *optarg;
 extern int optind, opterr, optopt;
 	   
@@ -20,21 +26,23 @@ static int helpEm(const char *progName)
 			"-f fill = set fill nibble (default 0) only relevant if -l or -h also provided).\n"
 			"-l = include just the low 4 bit nibble (default is to leave both nibbles in place)\n"
 			"-h = shift the upper nibble into the low bits\n"
-			"-o outfile = path to output file. If not specified input file is clipped in place\n"
-			"-t size = size to clip file (must be one of: 32, 64, 128, 256, 512 or 1024.)\n"
+			,progName);
+	 printf("-o outfile = path to output file. If not specified input file is clipped in place (orignal file renamed with .bak)\n"
+			"-t size = size in bytes to clip file (must be integer power of 2. I.e.: 32, 64, 128, etc.; max of %d)\n"
 			"-v = increase verbosity\n"
 			"filename = path to file\n"
-			,progName
+			,MAX_BUFSIZE
 			);
 	 return 1;
 }
+
+static unsigned char buf[MAX_BUFSIZE];	/* Put this outside to keep the stack from getting too deep. */
 
 int main(int argc, char *argv[])
 {
 	 int sts, ifd, ofd, flags, opt, fill=0, verbose=0;
 	 struct stat st;
 	 int bufSize, outFnameLen;
-	 unsigned char buf[1024];
 	 const char *inFname, *userOutName;
 	 char *endp, *outFname, *inBackupName=NULL;
 
@@ -66,7 +74,7 @@ int main(int argc, char *argv[])
 		 case 't':
 			 endp = NULL;
 			 bufSize = strtol(optarg,&endp,0);
-			 if (!endp || *endp || bufSize < 32 || bufSize > 1024 || ((bufSize&-bufSize) != bufSize) )
+			 if (!endp || *endp || bufSize < 32 || bufSize > MAX_BUFSIZE || ((bufSize&-bufSize) != bufSize) )
 			 {
 				 fprintf(stderr,"Invalid -t size parameter '%s'.\n", optarg);
 				 return helpEm(argv[0]);
@@ -108,9 +116,9 @@ int main(int argc, char *argv[])
 			fprintf(stderr,"File size not a multiple of power of 2. size=0x%X\n", bufSize);
 			return 1;
 		}
-		if ( bufSize < 64 || bufSize > (int)sizeof(buf) )
+		if ( bufSize < 32 || bufSize > (int)sizeof(buf) )
 		{
-			fprintf(stderr,"Input file size is %ld. Cannot be less than 64 or more than %ld\n", st.st_size, sizeof(buf));
+			fprintf(stderr,"Input file size is %ld. Cannot be less than 32 or more than %ld\n", st.st_size, sizeof(buf));
 			return 1;
 		}
 	}
@@ -124,7 +132,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr,"Warning: File is already %d bytes and no -l or -h option selected. Nothing to do.\n", bufSize);
 		return 1;
 	}
-	ifd = open(inFname, O_RDONLY);
+	ifd = open(inFname, O_RDONLY|O_BINARY);
 	if (ifd < 0)
 	{
 		fprintf(stderr,"Error open()'ing '%s' for input: %s\n", inFname, strerror(errno));
@@ -175,7 +183,7 @@ int main(int argc, char *argv[])
 	outFname = (char *)malloc(outFnameLen);
 	snprintf(outFname,outFnameLen-1,"%sXXXXXX", userOutName);
 	outFname[outFnameLen-1] = 0;
-	if ( (ofd = mkstemp(outFname)) < 0 )
+	if ( (ofd = mkostemp(outFname,O_BINARY)) < 0 )
 	{
 		fprintf(stderr,"Error: Unable to make tmp filename from '%s': %s\n", outFname, strerror(errno));
 		free(outFname);
