@@ -39,9 +39,11 @@ static int helpEm(const char *progName)
 
 int main(int argc, char *argv[])
 {
-	int sts, ifd, ofd, flags, opt, fill = 0, verbose = 0, noBak=0;
+	int ifd, ofd, flags, opt, fill = 0, verbose = 0, noBak=0, userBufSize=0;
 	struct stat st;
-	int bufSize, outFnameLen, offset;
+	int outFnameLen;
+	ssize_t sts;
+	unsigned long bufSize, offset;
 	const char *inFname, *cmdOutName, *userOutName;
 	char *inBackupName;
 	char *endp, *outFname;
@@ -53,6 +55,7 @@ int main(int argc, char *argv[])
 	userOutName = NULL;
 	cmdOutName = NULL;
 	inBackupName = NULL;
+	
 	while ( (opt = getopt(argc, argv, "f:hlno:s:t:v")) != -1 )
 	{
 		switch (opt)
@@ -80,8 +83,8 @@ int main(int argc, char *argv[])
 			break;
 		case 's':
 			endp = NULL;
-			offset = strtol(optarg, &endp, 0);
-			if ( !endp || *endp )
+			offset = strtoul(optarg, &endp, 0);
+			if ( !endp || *endp || offset >= (unsigned long)0x80000000 )
 			{
 				fprintf(stderr, "Invalid -s offset parameter '%s'.\n", optarg);
 				return helpEm(argv[0]);
@@ -89,12 +92,13 @@ int main(int argc, char *argv[])
 			break;
 		case 't':
 			endp = NULL;
-			bufSize = strtol(optarg, &endp, 0);
-			if ( !endp || *endp )
+			bufSize = strtoul(optarg, &endp, 0);
+			if ( !endp || *endp || bufSize >= (unsigned long)0x80000000 )
 			{
 				fprintf(stderr, "Invalid -t size parameter '%s'.\n", optarg);
 				return helpEm(argv[0]);
 			}
+			userBufSize = 1;
 			break;
 		case 'v':
 			++verbose;
@@ -122,12 +126,24 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Error stat()'ing '%s': %s\n", inFname, strerror(errno));
 		return 1;
 	}
+	if ( offset && offset > (unsigned long)st.st_size )
+	{
+		fprintf(stderr,"Error: Would seek to 0x%lX which is outside file size of 0x%lX\n", offset, st.st_size);
+		return 1;
+	}
 	if ( !bufSize )
-		bufSize = st.st_size;
+	{
+		bufSize = st.st_size-offset;
+		if ( bufSize >= (unsigned long)0x80000000)
+		{
+			fprintf(stderr,"Error: Input file is too big. size=0x%08lX\n", bufSize);
+			return 1;
+		}
+	}
 	buf = (unsigned char *)malloc(bufSize);
 	if ( !buf )
 	{
-		fprintf(stderr,"Ran out of memory malloc()'ing %d bytes\n",bufSize);
+		fprintf(stderr,"Ran out of memory malloc()'ing %ld bytes\n",bufSize);
 		return 1;
 	}
 	ifd = open(inFname, O_RDONLY | O_BINARY);
@@ -140,27 +156,38 @@ int main(int argc, char *argv[])
 	if ( offset )
 	{
 		if ( verbose )
-			printf("Seeking to offset 0x%X in input file\n", offset);
+			printf("Seeking to offset 0x%lX in input file\n", offset);
 		sts = lseek(ifd, offset, SEEK_SET);
 		if ( sts != offset )
 		{
-			fprintf(stderr,"Failed to seek to offset 0x%X: %s\n", offset, strerror(errno));
+			fprintf(stderr,"Failed to seek to offset 0x%lX: %s\n", offset, strerror(errno));
 			close(ifd);
 			free(buf);
 			return 1;
 		}
 	}
 	sts = read(ifd, buf, bufSize);
-	if ( sts != bufSize )
+	if ( sts < 0 || (!userBufSize && sts != bufSize) )
 	{
-		fprintf(stderr, "Error reading from '%s'. Expected %d bytes got %d: %s\n", inFname, bufSize, sts, strerror(errno));
+		fprintf(stderr, "Error reading from '%s'. Expected %ld bytes got %ld: %s\n", inFname, bufSize, sts, strerror(errno));
 		close(ifd);
 		free(buf);
 		return 1;
 	}
 	close(ifd);
 	if ( verbose )
-		printf("Read %d bytes from input file\n", sts);
+		printf("Read %ld bytes from input file\n", sts);
+	if ( !sts )
+	{
+		fprintf(stderr,"ERROR: Read 0 bytes from input. Nothing to do\n");
+		free(buf);
+		return 1;
+	}
+	if ( bufSize != sts )
+	{
+		printf("WARNING: Writing fewer bytes than might be expected. Wanted %ld, writing %ld\n", bufSize, sts );
+		bufSize = sts;
+	}
 	if ( !cmdOutName )
 	{
 		if ( !noBak )
@@ -169,7 +196,7 @@ int main(int argc, char *argv[])
 			inBackupName = (char *)calloc(sts, 1);
 			if ( !inBackupName )
 			{
-				fprintf(stderr, "Ran out of memory malloc()'ing %d bytes\n", sts);
+				fprintf(stderr, "Ran out of memory malloc()'ing %ld bytes\n", sts);
 				free(buf);
 				return 1;
 			}
@@ -211,11 +238,11 @@ int main(int argc, char *argv[])
 		}
 	}
 	if ( verbose )
-		printf("Writing %d bytes to output\n", bufSize);
+		printf("Writing %ld bytes to output\n", bufSize);
 	sts = write(ofd, buf, bufSize);
 	if ( sts != bufSize )
 	{
-		fprintf(stderr, "Error writing to '%s'. Expected to write %d, wrote %d: %s\n", outFname, bufSize, sts, strerror(errno));
+		fprintf(stderr, "Error writing to '%s'. Expected to write %ld, wrote %ld: %s\n", outFname, bufSize, sts, strerror(errno));
 		close(ofd);
 		unlink(outFname);
 		free(outFname);
@@ -224,7 +251,7 @@ int main(int argc, char *argv[])
 	}
 	close(ofd);
 	if ( verbose )
-		printf("Wrote %d bytes to output.\n", bufSize);
+		printf("Wrote %ld bytes to output.\n", bufSize);
 	if ( inBackupName )
 	{
 		if ( verbose )
